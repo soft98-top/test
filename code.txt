@@ -1,0 +1,949 @@
+# 记账网页端程序
+
+## 需求
+- 用户注册和登录功能，可以使用微信授权或其他方式
+- 账户设置和管理功能，可以设置用户信息、角色、权限等
+- 记账功能，可以记录收入和支出的类型、金额、备注等，可以设置固定支出的金额和周期，自动在账单中体现
+- 规划功能，可以对总支出、支出的类型等设置支出规划，超额进行提醒并在账单中突出显示
+- 月账单功能，可以查看每月的收支情况和余额
+- 图表分析功能，可以用图表展示收支的分类、比例、趋势等
+
+## 技术要求
+- 后端语言采用python，框架选择flask，数据库操作使用ORM
+- 前端使用单页面编写，界面UI使用element-ui组件，第三方库使用script标签引入，根据功能实现记账页面、规划页面、张单页面以及个人中心等
+
+## 后端代码
+```python
+# 后端代码
+from flask import Flask, request, jsonify
+from flask_sqlalchemy import SQLAlchemy
+import os
+
+app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql://username:password@localhost/database'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+
+# 定义用户模型
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password = db.Column(db.String(120), nullable=False)
+    role = db.Column(db.String(20), default='user')
+    permission = db.Column(db.String(20), default='normal')
+
+    def __repr__(self):
+        return '<User %r>' % self.username
+
+# 定义账单模型
+class Bill(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user = db.relationship('User', backref=db.backref('bills', lazy=True))
+    type = db.Column(db.String(20), nullable=False) # 收入或支出
+    category = db.Column(db.String(20), nullable=False) # 类型
+    amount = db.Column(db.Float, nullable=False) # 金额
+    remark = db.Column(db.String(200)) # 备注
+    date = db.Column(db.Date, nullable=False) # 日期
+
+    def __repr__(self):
+        return '<Bill %r>' % self.id
+
+# 定义规划模型
+class Plan(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user = db.relationship('User', backref=db.backref('plans', lazy=True))
+    total_budget = db.Column(db.Float, nullable=False) # 总预算
+    category_budgets = db.Column(db.JSON) # 分类预算，存储为字典
+
+    def __repr__(self):
+        return '<Plan %r>' % self.id
+
+# 创建数据库和表格（仅在第一次运行时执行）
+db.create_all()
+
+# 定义微信授权登录的接口（需要注册微信开放平台账号）
+@app.route('/wx_login', methods=['POST'])
+def wx_login():
+    code = request.form.get('code') # 获取微信小程序发送的code
+    appid = 'your_appid' # 微信开放平台的appid
+    secret = 'your_secret' # 微信开放平台的secret
+    url = f'https://api.weixin.qq.com/sns/jscode2session?appid={appid}&secret={secret}&js_code={code}&grant_type=authorization_code'
+    
+    # 向微信服务器发送请求，获取用户的openid和session_key
+    response = requests.get(url)
+    data = response.json()
+    
+    if data.get('errcode'): # 如果出错，返回错误信息
+        return jsonify({'error': data.get('errmsg')})
+    
+    openid = data.get('openid')
+    
+    # 根据openid查询数据库中是否有对应的用户，如果没有则创建一个新用户并返回其信息，如果有则更新其session_key并返回其信息
+    user = User.query.filter_by(username=openid).first()
+    
+    if not user: # 创建新用户
+        user = User(username=openid, password=data.get('session_key'))
+        db.session.add(user)
+        db.session.commit()
+    
+        return jsonify({'id': user.id, 'username': user.username, 'role': user.role, 'permission': user.permission})
+    
+    else: # 更新旧用户
+        user.password = data.get('session_key')
+        db.session.commit()
+        
+        return jsonify({'id': user.id, 'username': user.username, 'role': user.role, 'permission': user.permission})
+
+# 定义普通登录的接口（需要提供用户名和密码）
+@app.route('/login', methods=['POST'])
+def login():
+    username = request.form.get('username')
+    password = request.form.get('password')
+    
+    # 根据用户名查询数据库中是否有对应的用户，如果没有则返回错误信息，如果有则验证密码是否正确
+    user = User.query.filter_by(username=username).first()
+    
+    if not user: # 用户不存在
+        return jsonify({'error': 'User does not exist'})
+    
+    else: # 用户存在
+        if user.password == password: # 密码正确
+            return jsonify({'id': user.id, 'username': user.username, 'role': user.role, 'permission': user.permission})
+        else: # 密码错误
+            return jsonify({'error': 'Wrong password'})
+
+# 定义注册的接口（需要提供用户名和密码）
+@app.route('/register', methods=['POST'])
+def register():
+    username = request.form.get('username')
+    password = request.form.get('password')
+    
+    # 根据用户名查询数据库中是否有对应的用户，如果有则返回错误信息，如果没有则创建一个新用户并返回其信息
+    user = User.query.filter_by(username=username).first()
+    
+    if user: # 用户已存在
+        return jsonify({'error': 'User already exists'})
+    
+    else: # 用户不存在
+        user = User(username=username, password=password)
+        db.session.add(user)
+        db.session.commit()
+        
+        return jsonify({'id': user.id, 'username': user.username, 'role': user.role, 'permission': user.permission})
+
+# 定义账户设置和管理的接口（需要提供用户id和要修改的信息）
+@app.route('/account', methods=['POST'])
+def account():
+    id = request.form.get('id')
+    new_username = request.form.get('new_username')
+    new_password = request.form.get('new_password')
+    new_role = request.form.get('new_role')
+    new_permission = request.form.get('new_permission')
+    
+    # 根据用户id查询数据库中是否有对应的用户，如果没有则返回错误信息，如果有则更新其信息并返回
+    user = User.query.filter_by(id=id).first()
+    
+    if not user: # 用户不存在
+        return jsonify({'error': 'User does not exist'})
+    
+    else: # 用户存在
+        if new_username:
+            user.username = new_username
+        if new_password:
+            user.password = new_password
+        if new_role:
+            user.role = new_role
+        if new_permission:
+            user.permission = new_permission
+        
+        db.session.commit()
+        
+        return jsonify({'id': user.id, 'username': user.username, 'role': user.role, 'permission': user.permission})
+
+# 定义记账的接口（需要提供用户id和账单信息）
+@app.route('/record', methods=['POST'])
+def record():
+    id = request.form.get('id')
+    type = request.form.get('type') # 收入或支出
+    category = request.form.get('category') # 类型
+    amount = request.form.get('amount') # 金额
+    remark = request.form.get('remark') # 备注
+    date = request.form.get('date') # 日期
+    
+    # 根据用户id查询数据库中是否有对应的用户，如果没有则返回错误信息，如果有则创建一个新的账单并返回其信息
+    user = User.query.filter_by(id=id).first()
+    
+    if not user: # 用户不存在
+        return jsonify({'error': 'User does not exist'})
+    
+    else: # 用户存在
+        
+        bill = Bill(user_id=id, type=type, category=category, amount=amount, remark=remark, date=date)
+        db.session.add(bill)
+        db.session.commit()
+        
+        return jsonify({'id': bill.id, 'user_id': bill.user_id, 'type': bill.type, 'category': bill.category,
+                        'amount': bill.amount, 'remark': bill.remark, 'date': bill.date})
+
+# 定义规划的接口（需要提供用户id和规划信息）
+@app.route('/plan', methods=['POST'])
+def plan():
+    id = request.form.get('id')
+    total_budget = request.form.get('total_budget') # 总预算
+    category_budgets = request.form.get('category_budgets') # 分类预算，存储为字典
+    
+    # 根据用户id查询数据库中是否有对应的用户，如果没有则返回错误信息，如果有则创建或更新一个规划并返回其信息
+    user = User.query.filter_by(id=id).first()
+    
+    if not user: # 用户不存在
+        return jsonify({'error': 'User does not exist'})
+    
+    else: # 用户存在
+        
+        plan = Plan.query.filter_by(user_id=id).first()
+        
+        if not plan: # 规划不存在，创建新的规划
+            plan = Plan(user_id=id, total_budget=total_budget, category_budgets=category_budgets)
+            db.session.add(plan)
+            db.session.commit()
+            
+            return jsonify({'id': plan.id, 'user_id': plan.user_id, 'total_budget': plan.total_budget,
+                            'category_budgets': plan.category_budgets})
+        
+        else: # 规划存在，更新旧的规划
+            if total_budget:
+                plan.total_budget = total_budget
+            if category_budgets:
+                plan.category_budgets = category_budgets
+            
+            db.session.commit()
+            
+            return jsonify({'id': plan.id, 'user_id': plan.user_id, 'total_budget': plan.total_budget,
+                            'category_budgets': plan.category_budgets})
+
+# 定义月账单的接口（需要提供用户id和月份）
+@app.route('/monthly_bill', methods=['GET'])
+def monthly_bill():
+    id = request.args.get('id')
+    month = request.args.get('month') # 格式为YYYY-MM
+    
+    # 根据用户id查询数据库中是否有对应的用户，如果没有则返回错误信息，如果有则查询该月份的所有账单并返回
+    user = User.query.filter_by(id=id).first()
+    
+    if not user: # 用户不存在
+        return jsonify({'error': 'User does not exist'})
+    
+    else: # 用户存在
+        
+        bills = Bill.query.filter(Bill.user_id==id, Bill.date.like(f'{month}%')).all() # 模糊匹配日期
+        
+        result = []
+        
+        for bill in bills:
+            result.append({'id': bill.id, 'user_id': bill.user_id, 'type': bill.type, 'category': bill.category,
+                           'amount': bill.amount, 'remark': bill.remark, 'date': bill.date})
+        
+        return jsonify(result)
+
+# 定义图表分析的接口（需要提供用户id和月份）
+@app.route('/chart_analysis', methods=['GET'])
+def chart_analysis():
+    id = request.args.get('id')
+    month = request.args.get('month') # 格式为YYYY-MM
+    
+    # 根据用户id查询数据库中是否有对应的用户，如果没有则返回错误信息，如果有则查询该月份的收支情况并返回
+    user = User.query.filter_by(id=id).first()
+    
+    if not user: # 用户不存在
+        return jsonify({'error': 'User does not exist'})
+    
+    else: # 用户存在
+        
+        bills = Bill.query.filter(Bill.user_id==id, Bill.date.like(f'{month}%')).all() # 模糊匹配日期
+        
+        income_amount = 0.0 # 收入总额
+        expense_amount = 0.0 # 支出总额
+        balance_amount = 0.0 # 余额
+        
+        income_categories = {} # 收入分类统计
+        expense_categories = {} # 支出分类统计
+        
+        for bill in bills:
+            if bill.type == '收入':
+                income_amount += bill.amount
+                
+                if bill.category in income_categories:
+                    income_categories[bill.category] += bill.amount
+                else:
+                    income_categories[bill.category] = bill.amount
+            
+            elif bill.type == '支出':
+                expense_amount += bill.amount
+                
+                if bill.category in expense_categories:
+                    expense_categories[bill.category] += bill.amount
+                else:
+                    expense_categories[bill.category] = bill.amount
+        
+        balance_amount = income_amount - expense_amount
+        
+        result = {'income_amount': income_amount,
+                  'expense_amount': expense_amount,
+                  'balance_amount': balance_amount,
+                  'income_categories': income_categories,
+                  'expense_categories': expense_categories}
+        
+        return jsonify(result)
+
+# 定义超额提醒的接口（需要提供用户id和月份）
+@app.route('/over_budget_alert', methods=['GET'])
+def over_budget_alert():
+    id = request.args.get('id')
+    month = request.args.get('month') # 格式为YYYY-MM
+    
+    # 根据用户id查询数据库中是否有对应的用户，如果没有则返回错误信息，如果有则查询该月份的支出情况和规划情况并返回
+    user = User.query.filter_by(id=id).first()
+    
+    if not user: # 用户不存在
+        return jsonify({'error': 'User does not exist'})
+    
+    else: # 用户存在
+        
+        plan = Plan.query.filter_by(user_id=id).first() # 查询规划
+        
+        if not plan: # 规划不存在
+            return jsonify({'error': 'Plan does not exist'})
+        
+        else: # 规划存在
+            
+            bills = Bill.query.filter(Bill.user_id==id, Bill.type=='支出', Bill.date.like(f'{month}%')).all() # 模糊匹配日期和支出类型
+            
+            expense_amount = 0.0 # 支出总额
+            expense_categories = {} # 支出分类统计
+            
+            for bill in bills:
+                expense_amount += bill.amount
+                
+                if bill.category in expense_categories:
+                    expense_categories[bill.category] += bill.amount
+                else:
+                    expense_categories[bill.category] = bill.amount
+            
+            over_budget = False # 是否超额
+            over_total_budget = False # 是否超过总预算
+            over_category_budgets = [] # 超过分类预算的列表
+            
+            if expense_amount > plan.total_budget: # 超过总预算
+                over_budget = True
+                over_total_budget = True
+            
+            for category, budget in plan.category_budgets.items(): # 遍历分类预算
+                if category in expense_categories and expense_categories[category] > budget: # 超过分类预算
+                    over_budget = True
+                    over_category_budgets.append(category)
+            
+            result = {'over_budget': over_budget,
+                      'over_total_budget': over_total_budget,
+                      'over_category_budgets': over_category_budgets}
+            
+            return jsonify(result)
+
+if __name__ == '__main__':
+    app.run(debug=True) # 运行后端服务器
+```
+
+## 前端代码
+
+```
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>记账网页端程序</title>
+    <!-- 引入Element-UI样式 -->
+    <link rel="stylesheet" href="https://unpkg.com/element-ui/lib/theme-chalk/index.css">
+    <!-- 引入Vue -->
+    <script src="https://unpkg.com/vue/dist/vue.js"></script>
+    <!-- 引入Element-UI组件库 -->
+    <script src="https://unpkg.com/element-ui/lib/index.js"></script>
+    <!-- 引入axios -->
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+</head>
+<body>
+    <!-- 定义根组件 -->
+    <div id="app">
+        <!-- 定义导航栏 -->
+        <el-header class="header">
+            <div class="logo">记账网页端程序</div>
+            <div class="user-info">
+                <span>欢迎您，{{user.username}}</span>
+                <el-button type="primary" @click="logout">退出</el-button>
+            </div>
+        </el-header>
+        <!-- 定义侧边栏 -->
+        <el-container class="container">
+            <el-aside width="200px" class="aside">
+                <el-menu :default-active="$route.path" router :collapse="isCollapse" background-color="#545c64" text-color="#fff" active-text-color="#ffd04b">
+                    <el-menu-item index="/home">
+                        <i class="el-icon-s-home"></i>
+                        <span slot="title">首页</span>
+                    </el-menu-item>
+                    <el-menu-item index="/record">
+                        <i class="el-icon-s-order"></i>
+                        <span slot="title">记账</span>
+                    </el-menu-item>
+                    <el-menu-item index="/plan">
+                        <i class="el-icon-s-tools"></i>
+                        <span slot="title">规划</span>
+                    </el-menu-item>
+                    <el-menu-item index="/monthly_bill">
+                        <i class="el-icon-s-data"></i>
+                        <span slot="title">月账单</span>
+                    </el-menu-item>
+                    <el-menu-item index="/chart_analysis">
+                        <i class="el-icon-pie-chart"></i>
+                        <span slot="title">图表分析</span>
+                    </el-menu-item> 
+                </el-menu> 
+            </el-aside> 
+            <!-- 定义内容区域 -->
+            <router-view></router-view> 
+        </el-container> 
+    </div>
+
+    <!-- 定义登录组件模板 -->
+    <template id="login-template">
+        <div class="login-container">
+            <!-- 使用微信授权登录 -->
+            <!-- 微信小程序二维码图片，需要替换为自己的小程序码 -->
+            <!-- 微信小程序需要调用wx.login获取code，并发送给后端接口/wx_login -->
+            <!-- 后端接口需要使用code换取openid和session_key，并保存在数据库中作为用户的唯一标识和密码 -->
+            <!-- 后端接口返回用户信息给前端，前端保存在sessionStorage中，并跳转到首页 -->
+            <!-- 如果用户是第一次使用微信登录，则后端接口需要创建一个新用户并返回给前端 -->
+            <!-- 如果用户已经使用过微信登录，则后端接口需要更新用户的session_key并返回给前端 -->
+            <!-- 详细流程请参考：https://developers.weixin.qq.com/miniprogram/dev/framework/open-ability/login.html -->
+            <!-- 这里只是简单演示，实际开发中需要注意安全性和异常处理等问题 --> 
+            <div class="wx-login">
+                <img src="./wx_code.jpg" alt="">
+                使用微信扫码登录
+            </div>
+
+            <!-- 使用普通方式登录或注册 -->
+            <!-- 需要提供用户名和密码，发送给后端接口/login或/register -->
+            <!-- 后端接口需要验证用户名和密码是否正确，或者用户名是否已存在 -->
+            <!-- 后端接口返回用户信息给前端，前端保存在sessionStorage中，并跳转到首页 -->
+            <!-- 这里只是简单演示，实际开发中需要注意安全性和异常处理等问题 --> 
+            <div class="normal-login">
+                <el-form ref="form" :model="form" :rules="rules" label-width="80px">
+                    <el-form-item label="用户名" prop="username">
+                        <el-input v-model="form.username"></el-input>
+                    </el-form-item>
+                    <el-form-item label="密码" prop="password">
+                        <el-input type="password" v-model="form.password"></el-input>
+                    </el-form-item>
+                    <el-form-item>
+                        <el-button type="primary" @click="login">登录</el-button>
+                        <el-button @click="register">注册</el-button>
+                    </el-form-item>
+                </el-form>
+            </div>
+        </div>
+    </template>
+
+    <!-- 定义首页组件模板 -->
+    <template id="home-template">
+        <div class="home-container">
+            <h1>欢迎使用记账网页端程序</h1>
+            <p>您可以使用以下功能：</p>
+            <ul>
+                <li>记账：记录您的收入和支出情况</li>
+                <li>规划：设置您的总支出和支出分类的预算</li>
+                <li>月账单：查看您每月的收支情况和余额</li>
+                <li>图表分析：用图表展示您收支的分类、比例、趋势等</li>
+            </ul>
+        </div>
+    </template>
+
+    <!-- 定义记账组件模板 -->
+    <template id="record-template">
+        <div class="record-container">
+            <!-- 定义一个表单，用于输入账单信息 -->
+            <el-form ref="form" :model="form" :rules="rules" label-width="100px">
+                <!-- 选择收入或支出类型 -->
+                <el-form-item label="类型" prop="type">
+                    <el-radio-group v-model="form.type">
+                        <el-radio label="收入">收入</el-radio>
+                        <el-radio label="支出">支出</el-radio>
+                    </el-radio-group>
+                </el-form-item>
+
+                <!-- 选择收入或支出的分类 -->
+                <!-- 根据类型的不同，显示不同的分类选项 -->
+                <!-- 分类选项可以自定义，这里只是举例 -->
+                <el-form-item label="分类" prop="category">
+                    <el-select v-model="form.category" placeholder="请选择分类">
+                        <el-option v-for="item in categories[form.type]" :key="item.value" :label="item.label" :value="item.value"></el-option>
+                    </el-select>
+                </el-form-item>
+
+                <!-- 输入收入或支出的金额 -->
+                <el-form-item label="金额" prop="amount">
+                    <el-input type="number" v-model="form.amount"></el-input>
+                </el-form-item>
+
+                <!-- 输入收入或支出的备注 -->
+                <el-form-item label="备注" prop="remark">
+                    <el-input type="textarea" v-model="form.remark"></el-input>
+                </el-form-item>
+
+                <!-- 选择收入或支出的日期 -->
+                <el-form-item label="日期" prop="date">
+                    <el-date-picker type="date" v-model="form.date"></el-date-picker>
+                </el-form-item>
+
+                <!-- 提交表单，发送账单信息给后端接口/record -->
+                <!-- 后端接口需要创建一个新的账单并返回其信息 -->
+                <!-- 前端接口需要将新的账单添加到账单列表中，并清空表单 -->
+                <!-- 这里只是简单演示，实际开发中需要注意安全性和异常处理等问题 --> 
+                <el-form-item>
+                    <el-button type="primary" @click="submitForm">提交</el-button>
+                    <el-button @click="resetForm">重置</el-button>
+                </el-form-item>
+            </el-form>
+
+            <!-- 定义一个表格，用于显示账单列表 -->
+            <!-- 账单列表需要从后端接口/monthly_bill获取，根据用户id和当前月份查询 -->
+            <!-- 后端接口需要返回该月份的所有账单信息 -->
+            <!-- 前端接口需要将账单信息显示在表格中，并计算总收入、总支出和余额 -->
+            <!-- 这里只是简单演示，实际开发中需要注意安全性和异常处理等问题 --> 
+            <div class="bill-table">
+                <h2>本月账单</h2>
+                <p>总收入：{{totalIncome}} 元</p>
+                <p>总支出：{{totalExpense}} 元</p>
+                <p>余额：{{balance}} 元</p>
+                
+                <el-table :data="bills" border style="width: 100%">
+                    <el-table-column prop="type" label="类型" width="120"></el-table-column>
+                    <el-table-column prop="category" label="分类" width="120"></el-table-column>
+                    <el-table-column prop="amount" label="金额" width="120"></el-table-column>
+                    <el-table-column prop="remark" label="备注"></el-table-column>
+                    <el-table-column prop="date" label="日期" width="180"></el-table-column>
+                </el-table>
+            </div>
+        </div>
+    </template>
+
+    <!-- 定义规划组件模板 -->
+    <template id="plan-template">
+        <div class="plan-container">
+            <!-- 定义一个表单，用于输入规划信息 -->
+            <el-form ref="form" :model="form" :rules="rules" label-width="100px">
+                <!-- 输入总支出预算 -->
+                <el-form-item label="总预算" prop="total_budget">
+                    <el-input type="number" v-model.number="form.total_budget"></el-input>
+                </el-form-item>
+
+                <!-- 输入支出分类的预算 -->
+                <!-- 分类选项可以自定义，这里只是举例 -->
+                <el-form-item label="分类预算" prop="category_budgets">
+                    <div v-for="(item, index) in form.category_budgets" :key="index">
+                        {{item.category}}: 
+                        <el-input type="number" v-model.number="item.budget"></el-input>
+                    </div>
+                </el-form-item>
+
+                <!-- 提交表单，发送规划信息给后端接口/plan -->
+                <!-- 后端接口需要创建或更新一个规划并返回其信息 -->
+                <!-- 前端接口需要将规划信息显示在表单中，并提示成功或失败 -->
+                <!-- 这里只是简单演示，实际开发中需要注意安全性和异常处理等问题 --> 
+                <el-form-item>
+                    <el-button type="primary" @click="submitForm">提交</el-button>
+                    <el-button @click="resetForm">重置</el-button>
+                </el-form-item>
+            </el-form>
+
+            <!-- 定义一个表格，用于显示规划信息 -->
+            <!-- 规划信息需要从后端接口/plan获取，根据用户id查询 -->
+            <!-- 后端接口需要返回用户的规划信息，如果没有则返回空 -->
+            <!-- 前端接口需要将规划信息显示在表格中，并计算总预算和分类预算的比例 -->
+            <!-- 这里只是简单演示，实际开发中需要注意安全性和异常处理等问题 --> 
+            <div class="plan-table">
+                <h2>本月规划</h2>
+                <p>总预算：{{totalBudget}} 元</p>
+                
+                <el-table :data="plans" border style="width: 100%">
+                    <el-table-column prop="category" label="分类" width="120"></el-table-column>
+                    <el-table-column prop="budget" label="预算" width="120"></el-table-column>
+                    <el-table-column label="比例">
+                        <template slot-scope="scope">
+                            {{scope.row.budget / totalBudget * 100}} %
+                        </template>
+                    </el-table-column>
+                </el-table>
+            </div>
+        </div>
+    </template>
+
+    <!-- 定义月账单组件模板 -->
+    <template id="monthly-bill-template">
+        <div class="monthly-bill-container">
+            <!-- 定义一个日期选择器，用于选择月份 -->
+            <!-- 选择月份后，发送给后端接口/monthly_bill，根据用户id和月份查询账单信息 -->
+            <!-- 后端接口需要返回该月份的所有账单信息 -->
+            <!-- 前端接口需要将账单信息显示在表格中，并计算总收入、总支出和余额 -->
+            <!-- 这里只是简单演示，实际开发中需要注意安全性和异常处理等问题 --> 
+            <div class="month-picker">
+                <span>请选择月份：</span>
+                <el-date-picker type="month" v-model="month"></el-date-picker>
+            </div>
+
+            <!-- 定义一个表格，用于显示账单列表 -->
+            <div class="bill-table">
+                <h2>{{monthLabel}} 账单</h2>
+                <p>总收入：{{totalIncome}} 元</p>
+                <p>总支出：{{totalExpense}} 元</p>
+                <p>余额：{{balance}} 元</p>
+
+                <el-table :data="bills" border style="width: 100%">
+                    <el-table-column prop="type" label="类型" width="120"></el-table-column>
+                    <el-table-column prop="category" label="分类" width="120"></el-table-column>
+                    <el-table-column prop="amount" label="金额" width="120"></el-table-column>
+                    <el-table-column prop="remark" label="备注"></el-table-column>
+                    <el-table-column prop="date" label="日期" width="180"></el-table-column>
+                </el-table>
+            </div>
+        </div>
+    </template>
+
+    <!-- 定义图表分析组件模板 -->
+    <template id="chart-analysis-template">
+        <div class="chart-analysis-container">
+            <!-- 定义一个日期选择器，用于选择月份 -->
+            <!-- 选择月份后，发送给后端接口/chart_analysis，根据用户id和月份查询收支情况 -->
+            <!-- 后端接口需要返回该月份的收入总额、支出总额、余额、收入分类统计、支出分类统计 -->
+            <!-- 前端接口需要将收支情况显示在图表中，使用echarts插件绘制图表 -->
+            <!-- 这里只是简单演示，实际开发中需要注意安全性和异常处理等问题 --> 
+            <div class="month-picker">
+                <span>请选择月份：</span>
+                <el-date-picker type="month" v-model="month"></el-date-picker>
+            </div>
+
+            <!-- 定义一个饼图，用于显示收入分类的比例 -->
+            <div class="income-chart">
+                <h2>{{monthLabel}} 收入分类</h2>
+                <!-- 使用echarts插件绘制饼图 -->
+                <!-- 需要引入echarts.js文件，并在mounted钩子函数中初始化图表实例 -->
+                <!-- 需要定义一个watcher，监听数据变化，并更新图表选项 -->
+                <!-- 需要定义一个方法，根据数据生成图表选项 -->
+                <!-- 详细用法请参考：https://echarts.apache.org/zh/index.html --> 
+                <div id="incomeChart" style="width: 600px; height: 400px;"></div>
+            </div>
+
+            <!-- 定义一个饼图，用于显示支出分类的比例 -->
+            <div class="expense-chart">
+                <h2>{{monthLabel}} 支出分类</h2>
+                <!-- 使用echarts插件绘制饼图 -->
+                <!-- 需要引入echarts.js文件，并在mounted钩子函数中初始化图表实例 -->
+                <!-- 需要定义一个watcher，监听数据变化，并更新图表选项 -->
+                <!-- 需要定义一个方法，根据数据生成图表选项 -->
+                <!-- 详细用法请参考：https://echarts.apache.org/zh/index.html --> 
+                <div id="expenseChart" style="width: 600px; height: 400px;"></div>
+            </div>
+
+            <!-- 定义一个柱状图，用于显示收支趋势 -->
+            <div class="trend-chart">
+                <h2>{{monthLabel}} 收支趋势</h2>
+                <!-- 使用echarts插件绘制柱状图 -->
+                <!-- 需要引入echarts.js文件，并在mounted钩子函数中初始化图表实例 -->
+                <!-- 需要定义一个watcher，监听数据变化，并更新图表选项 -->
+                <!-- 需要定义一个方法，根据数据生成图表选项 -->
+                <!-- 详细用法请参考：https://echarts.apache.org/zh/index.html --> 
+                <div id="trendChart" style="width: 800px; height: 400px;"></div>
+            </div>
+
+            <!-- 定义一个超额提醒，用于显示是否超过预算 -->
+            <div class="over-budget-alert">
+                <h2>{{monthLabel}} 超额提醒</h2>
+                <!-- 发送请求给后端接口/over_budget_alert，根据用户id和月份查询是否超过预算 -->
+                <!-- 后端接口需要返回是否超过总预算和分类预算的信息 -->
+                <!-- 前端接口需要根据返回的信息显示不同的提醒内容 -->
+                <!-- 这里只是简单演示，实际开发中需要注意安全性和异常处理等问题 --> 
+                
+                <p v-if="!overBudget">恭喜您，本月没有超过预算！</p>
+                
+                <p v-if="overBudget && overTotalBudget">警告！您已经超过本月总预算！请节约消费！</p>
+
+                <p v-if="overBudget && overCategoryBudgets.length > 0">注意！您已经超过以下分类的预算：</p>
+                
+                <ul v-if="overBudget && overCategoryBudgets.length > 0">
+                    <li v-for="(item, index) in overCategoryBudgets" :key="index">{{item}}</li>
+                </ul>
+            </div>
+        </div>
+    </template>
+
+    <!-- 定义路由配置，将不同的路径映射到不同的组件 -->
+    <script>
+        // 定义登录组件
+        const Login = {
+            template: "#login-template",
+            data() {
+              return {
+                  form: {
+                      username: "",
+                      password: ""
+                  },
+                  rules: {
+                      username: [
+                          { required: true, message: "请输入用户名", trigger: "blur" }
+                      ],
+                      password: [
+                          { required: true, message: "请输入密码", trigger: "blur" }
+                      ]
+                  }
+              };
+            },
+            methods: {
+              login() {
+                  // 表单验证
+                  this.$refs.form.validate(valid => {
+                      if (valid) {
+                          // 发送请求给后端接口/login
+                          axios.post("/login", this.form)
+                          .then(response => {
+                              // 获取用户信息
+                              let user = response.data;
+                              if (user.error) {
+                                  // 登录失败，提示错误信息
+                                  this.$message.error(user.error);
+                              } else {
+                                  // 登录成功，保存用户信息到sessionStorage
+                                  sessionStorage.setItem("user", JSON.stringify(user));
+                                  // 跳转到首页
+                                  this.$router.push("/home");
+                              }
+                          })
+                          .catch(error => {
+                            // 请求失败，提示错误信息
+                            this.$message.error(error.message);
+                        });
+                    } else {
+                        // 表单验证失败，提示错误信息
+                        this.$message.error("请输入用户名和密码");
+                        return false;
+                    }
+                });
+            },
+            register() {
+                // 表单验证
+                this.$refs.form.validate(valid => {
+                    if (valid) {
+                        // 发送请求给后端接口/register
+                        axios.post("/register", this.form)
+                        .then(response => {
+                            // 获取用户信息
+                            let user = response.data;
+                            if (user.error) {
+                                // 注册失败，提示错误信息
+                                this.$message.error(user.error);
+                            } else {
+                                // 注册成功，保存用户信息到sessionStorage
+                                sessionStorage.setItem("user", JSON.stringify(user));
+                                // 跳转到首页
+                                this.$router.push("/home");
+                            }
+                        })
+                        .catch(error => {
+                            // 请求失败，提示错误信息
+                            this.$message.error(error.message);
+                        });
+                    } else {
+                        // 表单验证失败，提示错误信息
+                        this.$message.error("请输入用户名和密码");
+                        return false;
+                    }
+                });
+            }
+          }
+      };
+
+      // 定义首页组件
+      const Home = {
+          template: "#home-template",
+          data() {
+              return {
+                  user: {}
+              };
+          },
+          created() {
+              // 获取用户信息
+              let user = sessionStorage.getItem("user");
+              if (user) {
+                  this.user = JSON.parse(user);
+              } else {
+                  // 如果没有用户信息，跳转到登录页面
+                  this.$router.push("/login");
+              }
+          },
+          methods: {
+              logout() {
+                  // 清空用户信息
+                  sessionStorage.removeItem("user");
+                  // 跳转到登录页面
+                  this.$router.push("/login");
+              }
+          }
+      };
+
+      // 定义记账组件
+      const Record = {
+          template: "#record-template",
+          data() {
+              return {
+                  form: { 
+                      type: "收入",
+                      category: "",
+                      amount: 0,
+                      remark: "",
+                      date: new Date()
+                  },
+                  rules: { 
+                      type: [
+                          { required: true, message: "请选择类型", trigger: "change" }
+                      ],
+                      category: [
+                          { required: true, message: "请选择分类", trigger: "change" }
+                      ],
+                      amount: [
+                          { required: true, message: "请输入金额", trigger: "blur" },
+                          { type: "number", message: "金额必须为数字值", trigger: "blur" }
+                        ],
+                        remark: [
+                            { required: true, message: "请输入备注", trigger: "blur" }
+                        ],
+                        date: [
+                            { type: "date", required: true, message: "请选择日期", trigger: "change" }
+                        ]
+                    },
+                    categories: {
+                        收入: [
+                            { value: "工资", label: "工资" },
+                            { value: "奖金", label: "奖金" },
+                            { value: "投资", label: "投资" },
+                            { value: "其他", label: "其他" }
+                        ],
+                        支出: [
+                            { value: "餐饮", label: "餐饮" },
+                            { value: "交通", label: "交通" },
+                            { value: "购物", label: "购物" },
+                            { value: "娱乐", label: "娱乐" },
+                            { value: "医疗", label: "医疗" },
+                            { value: "教育", label: "教育" },
+                            { value: "其他", label: "其他" }
+                        ]
+                    },
+                    bills:[]
+                };
+            },
+            created() {
+                // 获取用户信息
+                let user = sessionStorage.getItem("user");
+                if (user) {
+                    this.user = JSON.parse(user);
+                } else {
+                    // 如果没有用户信息，跳转到登录页面
+                    this.$router.push("/login");
+                }
+                // 获取当前月份的账单信息
+                this.fetchData();
+            },
+            methods:{
+                submitForm() {
+                    // 表单验证
+                    this.$refs.form.validate(valid => {
+                        if (valid) {
+                            // 发送请求给后端接口/record
+                            axios.post("/record", {...this.form, user_id:this.user.id})
+                            .then(response => {
+                                // 获取账单信息
+                                let bill = response.data;
+                                if (bill.error) {
+                                    // 提交失败，提示错误信息
+                                    this.$message.error(bill.error);
+                                } else {
+                                    // 提交成功，将账单添加到列表中，并清空表单
+                                    this.bills.push(bill);
+                                    this.resetForm();
+                                    this.$message.success("提交成功");
+                                }
+                            })
+                            .catch(error => {
+                                // 请求失败，提示错误信息
+                                this.$message.error(error.message);
+                            });
+                        } else {
+                            // 表单验证失败，提示错误信息
+                            this.$message.error("请完善表单信息");
+```
+
+## 路由信息
+```
+# 定义微信授权登录的接口（需要注册微信开放平台账号）
+@app.route('/wx_login', methods=['POST'])
+# 定义普通登录的接口（需要提供用户名和密码）
+@app.route('/login', methods=['POST'])
+# 定义注册的接口（需要提供用户名和密码）
+@app.route('/register', methods=['POST'])
+# 定义账户设置和管理的接口（需要提供用户id和要修改的信息）
+@app.route('/account', methods=['POST'])
+# 定义记账的接口（需要提供用户id和账单信息）
+@app.route('/record', methods=['POST'])
+# 定义规划的接口（需要提供用户id和规划信息）
+@app.route('/plan', methods=['POST'])
+# 定义月账单的接口（需要提供用户id和月份）
+@app.route('/monthly_bill', methods=['GET'])
+# 定义图表分析的接口（需要提供用户id和月份）
+@app.route('/chart_analysis', methods=['GET'])
+# 定义超额提醒的接口（需要提供用户id和月份）
+@app.route('/over_budget_alert', methods=['GET'])
+```
+
+## 数据库模型
+```python
+# 定义用户模型
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password = db.Column(db.String(120), nullable=False)
+    role = db.Column(db.String(20), default='user')
+    permission = db.Column(db.String(20), default='normal')
+
+    def __repr__(self):
+        return '<User %r>' % self.username
+
+# 定义账单模型
+class Bill(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user = db.relationship('User', backref=db.backref('bills', lazy=True))
+    type = db.Column(db.String(20), nullable=False) # 收入或支出
+    category = db.Column(db.String(20), nullable=False) # 类型
+    amount = db.Column(db.Float, nullable=False) # 金额
+    remark = db.Column(db.String(200)) # 备注
+    date = db.Column(db.Date, nullable=False) # 日期
+
+    def __repr__(self):
+        return '<Bill %r>' % self.id
+
+# 定义规划模型
+class Plan(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user = db.relationship('User', backref=db.backref('plans', lazy=True))
+    total_budget = db.Column(db.Float, nullable=False) # 总预算
+    category_budgets = db.Column(db.JSON) # 分类预算，存储为字典
+
+    def __repr__(self):
+        return '<Plan %r>' % self.id
+```
